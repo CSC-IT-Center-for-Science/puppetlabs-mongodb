@@ -16,6 +16,19 @@ Puppet::Type.type(:mongodb_replset).provide(:mongo) do
 
   commands :mongo => 'mongo'
 
+  # Optional defaults file
+  def self.mongorc_file
+    if File.file?("#{Facter.value(:root_home)}/.mongorc.js")
+      "load('#{Facter.value(:root_home)}/.mongorc.js'); "
+    else
+      nil
+    end
+  end
+
+  def mongorc_file
+    self.class.mongorc_file
+  end
+
   mk_resource_methods
 
   def initialize(resource={})
@@ -171,6 +184,10 @@ Puppet::Type.type(:mongodb_replset).provide(:mongo) do
         if status.has_key?('errmsg') and status['errmsg'] == 'not running with --replSet'
           raise Puppet::Error, "Can't configure replicaset #{self.name}, host #{host} is not supposed to be part of a replicaset."
         end
+        if status.has_key?('code') and status['code'] == 13
+          Puppet.debug "Can't authenticate to member #{host}, but assuming member is configured for replicaset #{self.name}"
+	  status['set'] = self.name
+        end
         if status.has_key?('set')
           if status['set'] != self.name
             raise Puppet::Error, "Can't configure replicaset #{self.name}, host #{host} is already part of another replicaset."
@@ -245,6 +262,10 @@ Puppet::Type.type(:mongodb_replset).provide(:mongo) do
   end
 
   def mongo_command(command, host, retries=4)
+    # make a connection to bind_ip instead of hostname
+    if host.include? Facter.value(:hostname)
+      host = self.class.get_conn_string
+    end
     self.class.mongo_command(command,host,retries)
   end
 
@@ -256,7 +277,7 @@ Puppet::Type.type(:mongodb_replset).provide(:mongo) do
       args = Array.new
       args << '--quiet'
       args << ['--host',host] if host
-      args << ['--eval',"printjson(#{command})"]
+      args << ['--eval',"#{mongorc_file} printjson(#{command})"]
       output = mongo(args.flatten)
     rescue Puppet::ExecutionFailure => e
       if e =~ /Error: couldn't connect to server/ and wait <= 2**max_wait
@@ -272,6 +293,7 @@ Puppet::Type.type(:mongodb_replset).provide(:mongo) do
     # Dirty hack to remove JavaScript objects
     output.gsub!(/ISODate\((.+?)\)/, '\1 ')
     output.gsub!(/Timestamp\((.+?)\)/, '[\1]')
+    output.gsub!(/Error.*/, '')
 
     #Hack to avoid non-json empty sets
     output = "{}" if output == "null\n"
